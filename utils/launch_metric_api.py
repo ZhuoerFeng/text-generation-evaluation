@@ -1,4 +1,3 @@
-import evaluate 
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from nltk.translate.meteor_score import meteor_score
 from nltk.tokenize import word_tokenize
@@ -17,20 +16,20 @@ from bleurt_pytorch import BleurtConfig, BleurtForSequenceClassification, Bleurt
 from flask import Flask, request, jsonify
 app = Flask(__name__)
 
-config = BleurtConfig.from_pretrained('lucadiliello/BLEURT-20')
+config = BleurtConfig.from_pretrained('/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20')
 model = BleurtForSequenceClassification.from_pretrained(
-    'BLEURT-20', 
+    '/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20', 
     torch_dtype=torch.bfloat16,
 )
 model.eval()
-tokenizer = BleurtTokenizer.from_pretrained('lucadiliello/BLEURT-20')
+tokenizer = BleurtTokenizer.from_pretrained('/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20')
 
 # from -1 to 1
-def compute_bleurt_score(inference, source):
-    inputs = tokenizer(inference, source, padding='longest', return_tensors='pt', max_length=512, truncation=True)
+def compute_bleurt_score(solution_str: str, ground_truth_list: str, format_score=0.0, score=1.0):
+    inputs = tokenizer(solution_str, ground_truth_list, padding='longest', return_tensors='pt', max_length=512, truncation=True)
     with torch.no_grad():
         scores = model(**inputs).logits.flatten().tolist()
-    return scores[0] if isinstance(inference, str) else scores
+    return scores[0] if isinstance(solution_str, str) else scores
 
 
 # rouge = Rouge()
@@ -57,7 +56,7 @@ def compute_bleu_score(solution_str: str, ground_truth_list: list, weights=(1, 0
     return value_score * score
 
 
-def compute_rouge_score(solution_str: str, ground_truth: str, rouge_gram: int, format_score=0.0, score=1.0):
+def compute_rouge_score(solution_str: str, ground_truth: str, format_score=0.0, score=1.0):
     """The scoring function for Infilling.
 
     Args:
@@ -80,7 +79,8 @@ def compute_rouge_score(solution_str: str, ground_truth: str, rouge_gram: int, f
 
     # return value_score * score
     scores = scorer.score(ground_truth, solution_str)
-    return scores['rougeL'] * score
+    print(scores)
+    return scores['rougeL'].fmeasure * score
 
 
 def compute_meteror_score(solution_str: str, ground_truth_list: list, format_score=0.0, score=1.0):
@@ -209,6 +209,10 @@ def compute_length(solution_str: str, ground_truth: str, format_score=0.0, score
     """
     solution_length = len(solution_str.strip())
     ground_truth_length = len(ground_truth.strip())
+    if ground_truth_length == 0:
+        return format_score
+    if solution_length == 0:
+        return format_score
     
     score = custom_function(
         t=solution_length,
@@ -372,15 +376,11 @@ def predict_rouge():
     if "prompt" not in data or "response" not in data or "ground_truth" not in data or "rouge_gram" not in data:
         return jsonify({"error": "Missing 'prompt/response/ground_truth/rouge_gram' field"}), 400
     
-    rouge_gram = data["rouge_gram"]
-    if rouge_gram not in [1, 2, 'l']:
-        return jsonify({"error": "Invalid 'rouge_gram' value, must be 1, 2, or 'l'"}), 400
     
     # 调用伪模型进行预测
     score = compute_rouge_score(
         solution_str=data["response"],
         ground_truth=data["ground_truth"],
-        rouge_gram=rouge_gram,
         format_score=0.0,
         score=1.0
     )
@@ -389,7 +389,6 @@ def predict_rouge():
         "prompt": data["prompt"],
         "response": data["response"],
         "ground_truth": data["ground_truth"],
-        "rouge_gram": rouge_gram,
         "score": score,
         "status": "success"
     }
