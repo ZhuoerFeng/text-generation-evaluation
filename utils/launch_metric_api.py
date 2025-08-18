@@ -25,15 +25,15 @@ model.eval()
 tokenizer = BleurtTokenizer.from_pretrained('/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20')
 
 # from -1 to 1
-def compute_bleurt_score(solution_str: str, ground_truth_list: str, format_score=0.0, score=1.0):
-    inputs = tokenizer(solution_str, ground_truth_list, padding='longest', return_tensors='pt', max_length=512, truncation=True)
+def compute_bleurt_score(solution_str: str, ground_truth: str, format_score=0.0, score=1.0):
+    inputs = tokenizer(solution_str, ground_truth, padding='longest', return_tensors='pt', max_length=512, truncation=True)
     with torch.no_grad():
         scores = model(**inputs).logits.flatten().tolist()
     return scores[0] if isinstance(solution_str, str) else scores
 
 
 # rouge = Rouge()
-scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+scorer = rouge_scorer.RougeScorer(['rouge1'], use_stemmer=True)
 prefix = '/workspace/fengzhuoer/andrew/checkpoints'
 bertscore_scorer = BERTScorer(model_type=os.path.join(prefix, 'roberta-large'), num_layers=17, lang='en')
 
@@ -80,7 +80,7 @@ def compute_rouge_score(solution_str: str, ground_truth: str, format_score=0.0, 
     # return value_score * score
     scores = scorer.score(ground_truth, solution_str)
     print(scores)
-    return scores['rougeL'].fmeasure * score
+    return scores['rouge1'].fmeasure * score
 
 
 def compute_meteror_score(solution_str: str, ground_truth_list: list, format_score=0.0, score=1.0):
@@ -95,10 +95,6 @@ def compute_meteror_score(solution_str: str, ground_truth_list: list, format_sco
 def compute_bert_score(solution_list: list, ground_truth_list: list, language='en', format_score=0.0, score=1.0):
     results = bertscore_scorer.score(cands=solution_list, refs=ground_truth_list, batch_size=32, verbose=True) # Tuple(Tensor, Tensor, Tensor)
     return (results[2] * score).detach().tolist()
-
-
-def compute_exact_match_score(solution_str, ground_truth, format_score=0.0, score=1.0):
-    return score if solution_str.strip() == ground_truth.strip() else format_score
 
     
 def f1_score(pred_set: set, label_set: set, format_score=0.0, score=1.0):
@@ -116,9 +112,35 @@ def compute_character_f1_score(solution_str: str, ground_truth: str, format_scor
     ground_truth_word = ground_truth.strip().split()
     ground_truth_characters = set(ground_truth_word)
     return f1_score(solution_characters, ground_truth_characters, format_score=format_score, score=score)
-    
-    
-def compute_math_answer_correct_score(solution_str: str, ground_truth, method="flexible", format_score=0.0, score=1.0):
+
+
+def gsm8k_extract_solution(solution_str, method="strict"):
+    assert method in ["strict", "flexible"]
+
+    if method == "strict":
+        # this also tests the formatting of the model
+        solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
+        if solution is None:
+            final_answer = None
+        else:
+            final_answer = solution.group(0)
+            final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+    elif method == "flexible":
+        answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
+        final_answer = None
+        if len(answer) == 0:
+            # no reward is there is no answer
+            pass
+        else:
+            invalid_str = ["", "."]
+            # find the last number that is not '.'
+            for final_answer in reversed(answer):
+                if final_answer not in invalid_str:
+                    break
+    return final_answer
+
+
+def compute_exact_match_score(solution_str, ground_truth, format_score=0.0, score=1.0):
     """The scoring function for GSM8k.
 
     Reference: Trung, Luong, et al. "Reft: Reasoning with reinforced fine-tuning." Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers). 2024.
@@ -130,45 +152,24 @@ def compute_math_answer_correct_score(solution_str: str, ground_truth, method="f
         format_score: the score for the format
         score: the score for the correct answer
     """
-    def extract_solution(solution_str, method="strict"):
-        assert method in ["strict", "flexible"]
+    method="flexible"
+    answer = gsm8k_extract_solution(solution_str=solution_str, method=method)
+    label = gsm8k_extract_solution(solution_str=ground_truth, method=method)
 
-        if method == "strict":
-            # this also tests the formatting of the model
-            solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
-            if solution is None:
-                final_answer = None
-            else:
-                final_answer = solution.group(0)
-                final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
-        elif method == "flexible":
-            answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
-            final_answer = None
-            if len(answer) == 0:
-                # no reward is there is no answer
-                pass
-            else:
-                invalid_str = ["", "."]
-                # find the last number that is not '.'
-                for final_answer in reversed(answer):
-                    if final_answer not in invalid_str:
-                        break
-        return final_answer
-
-    answer = extract_solution(solution_str=solution_str, method=method)
-    
-    if answer is None:
+    if answer is None and label is None:
+        return compute_character_f1_score(solution_str, ground_truth, format_score=format_score, score=score)
+    elif answer is None and label is not None:
         return 0
     else:
-        if answer == ground_truth:
+        if answer == ground_truth or answer == label:
             return score
         else:
             return format_score
 
 
-def gaussian_cdf(t, mu, sigma):
+def gaussian_pdf(t, mu, sigma):
     """Cumulative distribution function (CDF) for Gaussian distribution."""
-    return 0.5 * (1 + erf((t - mu) / (np.sqrt(2) * sigma)))
+    return 1 / (np.sqrt(2 * np.pi) * sigma) * np.exp(-((t - mu) ** 2) / (2 * sigma ** 2))
 
 
 def custom_function(t, T, sigma):
@@ -181,8 +182,8 @@ def custom_function(t, T, sigma):
     t = np.asarray(t) # Supports scalar or vector input
     
     # Calculate Gaussian CDF at endpoints
-    F_start = gaussian_cdf(0.75 * T, T, sigma)
-    F_end   = gaussian_cdf(T, T, sigma)
+    F_start = gaussian_pdf(0.75 * T, T, sigma)
+    F_end   = gaussian_pdf(T, T, sigma)
     
     # Precompute scaling coefficient
     scale = (0.25 * T) / (F_end - F_start)
@@ -192,7 +193,7 @@ def custom_function(t, T, sigma):
     y = np.where(
         t < 0.75 * T,
         t,
-        scale * (gaussian_cdf(t, T, sigma) - F_start) + shift
+        scale * (gaussian_pdf(t, T, sigma) - F_start) + shift
     )
     
     return y
@@ -229,7 +230,7 @@ def index():
     return jsonify({"msg": "OK"}), 200
 
 
-@app.route('/bleu_metric', methods=['POST'])
+@app.route('/predict_bleu_metric', methods=['POST'])
 def predict_bleu():
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
@@ -257,7 +258,7 @@ def predict_bleu():
     return jsonify(response), 200
 
 
-@app.route('/bleurt_metric', methods=['POST'])
+@app.route('/predict_bleurt_metric', methods=['POST'])
 def predict_bleurt():
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
@@ -267,7 +268,7 @@ def predict_bleurt():
         return jsonify({"error": "Missing 'prompt/response/ground_truth' field"}), 400
     
     # 调用伪模型进行预测
-    score = compute_bleurt_score(inference=data["response"], source=data["ground_truth"])
+    score = compute_bleurt_score(solution_str=data["response"], ground_truth=data["ground_truth"])
     
     score = score * 2 - 1  # Convert from [0, 1] to [-1, 1]
 
@@ -373,8 +374,8 @@ def predict_rouge():
         return jsonify({"error": "Request must be JSON"}), 400
     
     data = request.get_json()
-    if "prompt" not in data or "response" not in data or "ground_truth" not in data or "rouge_gram" not in data:
-        return jsonify({"error": "Missing 'prompt/response/ground_truth/rouge_gram' field"}), 400
+    if "prompt" not in data or "response" not in data or "ground_truth" not in data:
+        return jsonify({"error": "Missing 'prompt/response/ground_truth' field"}), 400
     
     
     # 调用伪模型进行预测
@@ -402,19 +403,19 @@ def predict_length():
         return jsonify({"error": "Request must be JSON"}), 400
     
     data = request.get_json()
-    if "solution_str" not in data or "ground_truth" not in data:
-        return jsonify({"error": "Missing 'solution_str/ground_truth' field"}), 400
+    if "response" not in data or "ground_truth" not in data:
+        return jsonify({"error": "Missing 'response/ground_truth' field"}), 400
     
     # 调用伪模型进行预测
     score = compute_length(
-        solution_str=data["solution_str"],
+        solution_str=data["response"],
         ground_truth=data["ground_truth"],
         format_score=0.0,
         score=1.0
     )
     
     response = {
-        "solution_str": data["solution_str"],
+        "solution_str": data["response"],
         "ground_truth": data["ground_truth"],
         "score": score,
         "status": "success"
@@ -423,3 +424,8 @@ def predict_length():
     return jsonify(response), 200
 
 
+
+# if __name__ == '__main__':
+#     app.run(host='0.0.0.0', port=5098, processes=8)
+    
+# gunicorn -w 4 --threads 5 -b 0.0.0.0:5098 launch_metric_api:app
