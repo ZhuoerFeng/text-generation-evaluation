@@ -1,3 +1,4 @@
+import nltk
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from nltk.translate.meteor_score import meteor_score
 from nltk.tokenize import word_tokenize
@@ -16,17 +17,21 @@ from bleurt_pytorch import BleurtConfig, BleurtForSequenceClassification, Bleurt
 from flask import Flask, request, jsonify
 app = Flask(__name__)
 
+nltk.data.path.append('/workspace/fengzhuoer/fze/nltk_data')  # set the path to your nltk_data directory
+
+
 config = BleurtConfig.from_pretrained('/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20')
 model = BleurtForSequenceClassification.from_pretrained(
     '/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20', 
     torch_dtype=torch.bfloat16,
+    device_map="cuda:7"
 )
 model.eval()
 tokenizer = BleurtTokenizer.from_pretrained('/workspace/fengzhuoer/andrew/checkpoints/BLEURT-20')
 
 # from -1 to 1
 def compute_bleurt_score(solution_str: str, ground_truth: str, format_score=0.0, score=1.0):
-    inputs = tokenizer(solution_str, ground_truth, padding='longest', return_tensors='pt', max_length=512, truncation=True)
+    inputs = tokenizer(solution_str, ground_truth, padding='longest', return_tensors='pt', max_length=512, truncation=True).to("cuda:7")
     with torch.no_grad():
         scores = model(**inputs).logits.flatten().tolist()
     return scores[0] if isinstance(solution_str, str) else scores
@@ -208,8 +213,8 @@ def compute_length(solution_str: str, ground_truth: str, format_score=0.0, score
         format_score: the score for the format
         score: the score for the correct answer
     """
-    solution_length = len(solution_str.strip())
-    ground_truth_length = len(ground_truth.strip())
+    solution_length = len(solution_str.strip().split())
+    ground_truth_length = len(ground_truth.strip().split())
     if ground_truth_length == 0:
         return format_score
     if solution_length == 0:
@@ -406,13 +411,19 @@ def predict_length():
     if "response" not in data or "ground_truth" not in data:
         return jsonify({"error": "Missing 'response/ground_truth' field"}), 400
     
-    # 调用伪模型进行预测
-    score = compute_length(
-        solution_str=data["response"],
-        ground_truth=data["ground_truth"],
-        format_score=0.0,
-        score=1.0
-    )
+    try:
+        score = compute_length(
+            solution_str=data["response"],
+            ground_truth=data["ground_truth"],
+            format_score=0.0,
+            score=1.0
+        )
+    except Exception as e:
+        print("Error in computing length score:")
+        print("[solution]\n" + data["response"])
+        print("[truth]\n" + data["ground_truth"])        
+        print(e)
+        score = 0.0
     
     response = {
         "solution_str": data["response"],
@@ -428,4 +439,5 @@ def predict_length():
 # if __name__ == '__main__':
 #     app.run(host='0.0.0.0', port=5098, processes=8)
     
-# gunicorn -w 4 --threads 5 -b 0.0.0.0:5098 launch_metric_api:app
+# gunicorn -w 10 --threads 5 -b 0.0.0.0:5098 launch_metric_api:app
+# 10.118.22.240
